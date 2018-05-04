@@ -15,6 +15,10 @@ class incidentReport:
     def __init__(self):
         self.file = askopenfilename(title="Open the Agency - Exclusion Report")
         self.raw_data = pd.read_excel(self.file, sheet_name="Exclusions")
+        self.staff_list = pd.read_excel(
+            askopenfilename(title="Open the Staff Names Report"),
+            sheet_name="All"
+        )
 
     def missing_data_check(self, data_frame):
         """
@@ -24,8 +28,15 @@ class incidentReport:
         :param data_frame: This should be a pandas data frame created from the 'Agency - Exclusion Report' ART report
         :return: a data frame showing incidents with errors will be returned
         """
+        data = data_frame
+        staff = self.staff_list
+        missing_df = data.merge(
+            staff,
+            how="left",
+            left_on="Infraction User Creating",
+            right_on="CM"
+        )
 
-        missing_df = data_frame
         check_columns = {
             "Infraction Provider": "Provider Error",
             "Infraction Banned End Date": "End Date Error",
@@ -56,10 +67,14 @@ class incidentReport:
                 conditions = [
                     (
                         missing_df[column].notna() &
-                        (missing_df["Infraction Banned Code"] == "TPI_Exclusion - Agency (Requires Reinstatement)")
+                        (missing_df["Infraction Banned Code"] == "TPI_Exclusion - Agency (requires reinstatement)")
+                    ),
+                    (
+                        missing_df[column].isna() &
+                        ~(missing_df["Infraction Banned Code"] == "TPI_Exclusion - Agency (requires reinstatement)")
                     )
                 ]
-                choices = ["Banned Date Should Be Blank"]
+                choices = ["End Date Should Be Blank", "End Date Should Not Be Blank"]
                 missing_df[check_columns[column]] = np.select(conditions, choices, default=None)
             elif column == "Infraction Staff Person":
                 conditions = [(missing_df[column].isna())]
@@ -92,7 +107,7 @@ class incidentReport:
 
         missing_df =  missing_df[[
             "Client Uid",
-            "Infraction User Creating",
+            "Name",
             "Infraction User Updating",
             "Infraction Banned Start Date",
             "Provider Error",
@@ -101,10 +116,48 @@ class incidentReport:
             "Incident Error",
             "Incident Code Error",
             "Sites Excluded From Error",
-            "Notes Error"
+            "Notes Error",
+            "Dept"
         ]]
         missing_df["Infraction Banned Start Date"] = missing_df["Infraction Banned Start Date"].dt.date
+
+        # counts columns in the provided range with a value
+        missing_df["Errors"] = missing_df[[
+            "Provider Error",
+            "End Date Error",
+            "Staff Name Error",
+            "Incident Error",
+            "Incident Code Error",
+            "Sites Excluded From Error",
+            "Notes Error"
+        ]].apply(lambda x: x.count(), axis=1)
         return missing_df
+
+
+    def create_summary(self, data_frame):
+        """
+        This method will take the data_frame parameter, turn it into a pivot table using pandas'
+        .pivot_table method and add a new Error Rate column
+
+        :data_frame: the errors data_frame
+        :return: Will return a pivot table using data from the data_fram parameter
+        """
+        staff_pivot = pd.pivot_table(
+            data_frame,
+            index=["Dept", "Name"],
+            values=["Client Uid", "Errors"],
+            aggfunc={"Client Uid": len, "Errors": np.sum}
+        )
+        staff_pivot["Error Rate"] = staff_pivot["Errors"] / (staff_pivot["Client Uid"] * 7)
+
+        dept_pivot = pd.pivot_table(
+            data_frame,
+            index=["Dept"],
+            values=["Client Uid", "Errors"],
+            aggfunc={"Client Uid": len, "Errors": np.sum}
+        )
+        dept_pivot["Error Rate"] = dept_pivot["Errors"] / (dept_pivot["Client Uid"] * 7)
+        return staff_pivot, dept_pivot
 
     def process(self):
         """
@@ -128,7 +181,14 @@ class incidentReport:
             "Infraction Notes"
         ]]
         errors = self.missing_data_check(self.raw_data.copy())
-        writer = pd.ExcelWriter(asksaveasfilename(title="Save As"), engine="xlsxwriter")
+        staff_summary, dept_summary = self.create_summary(errors)
+
+        writer = pd.ExcelWriter(
+            asksaveasfilename(title="Save the processed exclusion report"),
+            engine="xlsxwriter"
+        )
+        staff_summary.to_excel(writer, sheet_name="Staff Summary")
+        dept_summary.to_excel(writer, sheet_name="Dept Summary")
         errors.to_excel(writer, sheet_name="Errors", index=False)
         raw.to_excel(writer, sheet_name="Raw Data", index=False)
         writer.save()
